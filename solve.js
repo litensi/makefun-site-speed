@@ -520,17 +520,95 @@ function parseTemplate(name, src) {
   return root.body;
 }
 
-/** The value at `path` in the scope chain: its first name from the nearest scope holding it, then own properties. */
-function lookup(scope, path) {
-  let s = scope;
-  while (s !== null && !Object.hasOwn(s.vars, path[0])) s = s.parent;
-  if (s === null) return undefined;
-  let v = s.vars[path[0]];
-  for (let k = 1; k < path.length; k++) {
-    if (v === null || typeof v !== 'object' || !Object.hasOwn(v, path[k])) return undefined;
-    v = v[path[k]];
+function binding(scope, name) {
+  while (scope.parent !== null) {
+    if (name === 'loop') return scope.loop;
+    if (name === scope.name) return scope.value;
+    scope = scope.parent;
   }
-  return v;
+  return Object.hasOwn(scope.vars, name) ? scope.vars[name] : undefined;
+}
+
+/** Each path segment after the binding must be an own property on an object. */
+function lookup(scope, path) {
+  let value = binding(scope, path[0]);
+  for (let k = 1; k < path.length; k++) {
+    if (value === null || typeof value !== 'object' || !Object.hasOwn(value, path[k])) return undefined;
+    value = value[path[k]];
+  }
+  return value;
+}
+
+/** Find the bindings a template reads and how much include depth it needs. */
+function prepareTemplates(templates) {
+  const analyses = Array.from({ length: INCLUDE_DEPTH + 1 }, () => new Map());
+  function analyze(nodes, remaining) {
+    const previous = analyses[remaining].get(nodes);
+    if (previous !== undefined) return previous;
+    const names = new Set();
+    let height = 0;
+    function merge(child, step, boundName) {
+      const result = analyze(child, remaining - step);
+      height = Math.max(height, result.height + step);
+      for (const name of result.names) {
+        if (boundName === undefined || (name !== boundName && name !== 'loop')) names.add(name);
+      }
+    }
+    for (const node of nodes) {
+      if (node.path) names.add(node.path[0]);
+      if (node.kind === 'for') {
+        merge(node.body, 0, node.name);
+      } else if (node.kind === 'if') {
+        merge(node.then, 0);
+        if (node.else !== null) merge(node.else, 0);
+      } else if (node.kind === 'include' && remaining > 0) {
+        const child = templates.get(node.name);
+        if (child !== undefined) merge(child, 1);
+      }
+    }
+    const result = { names, height };
+    analyses[remaining].set(nodes, result);
+    return result;
+  }
+  const cache = new Map();
+  for (const [name, nodes] of templates) {
+    let result;
+    try {
+      result = analyze(nodes, INCLUDE_DEPTH);
+    } catch (error) {
+      // The analysis is optional, even for a deeply nested, unused template.
+      if (error instanceof RangeError) return new Map();
+      throw error;
+    }
+    const { names, height } = result;
+    // Cache shallow dependency sets. The general interpreter handles all other scopes.
+    if (names.size <= 2 && nodes.length !== 0) {
+      cache.set(name, { names: [...names], height, values: new Map() });
+    }
+  }
+  return cache;
+}
+
+function renderInclude(name, nodes, scope, ctx, depth) {
+  const entry = ctx.cache.get(name);
+  if (entry === undefined || depth + entry.height > INCLUDE_DEPTH) return renderNodes(nodes, scope, ctx, depth);
+  let values = entry.values;
+  for (let k = 1; k < entry.names.length; k++) {
+    const key = binding(scope, entry.names[k - 1]);
+    let next = values.get(key);
+    if (next === undefined) {
+      next = new Map();
+      values.set(key, next);
+    }
+    values = next;
+  }
+  const key = entry.names.length === 0 ? undefined : binding(scope, entry.names[entry.names.length - 1]);
+  let html = values.get(key);
+  if (html === undefined) {
+    html = renderNodes(nodes, scope, ctx, depth);
+    values.set(key, html);
+  }
+  return html;
 }
 
 /** A value as text: a string itself, a number in JavaScript's digits, true or false, an array's items joined by ", ", else "". */
@@ -574,15 +652,16 @@ function renderNodes(nodes, scope, ctx, depth) {
       case 'for': {
         const xs = lookup(scope, n.path);
         if (!Array.isArray(xs)) break;
-        xs.forEach((x, k) => {
-          const vars = { [n.name]: x, loop: { index: k + 1, first: k === 0, last: k === xs.length - 1, length: xs.length } };
-          out += renderNodes(n.body, { vars, parent: scope }, ctx, depth);
-        });
+        for (let k = 0; k < xs.length; k++) {
+          if (!(k in xs)) continue;
+          const loop = { index: k + 1, first: k === 0, last: k === xs.length - 1, length: xs.length };
+          out += renderNodes(n.body, { name: n.name, value: xs[k], loop, parent: scope }, ctx, depth);
+        }
         break;
       }
       case 'include': {
         const t = ctx.templates.get(n.name);
-        if (t !== undefined && depth < INCLUDE_DEPTH) out += renderNodes(t, scope, ctx, depth + 1);
+        if (t !== undefined && depth < INCLUDE_DEPTH) out += renderInclude(n.name, t, scope, ctx, depth + 1);
         break;
       }
     }
@@ -805,7 +884,7 @@ function layouts(b) {
   const site = { title: b.input.site.title, base_url: b.base };
   const allTags = b.tags.map((t) => ({ name: t.name, slug: t.slug, url: t.url, count: t.posts.length }));
   const recent = b.posts.slice(0, b.input.site.recent).map((p) => b.cards.get(p));
-  const ctx = { templates: b.templates, escape: escapeHtml };
+  const ctx = { templates: b.templates, cache: prepareTemplates(b.templates), escape: escapeHtml };
   const render = (name, vars) => {
     const nodes = b.templates.get(name);
     return nodes === undefined ? null : renderNodes(nodes, { vars: { site, tags: allTags, recent, ...vars }, parent: null }, ctx, 0);
