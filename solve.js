@@ -21,7 +21,7 @@ const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&
 
 /** `text` with & < > " and ' escaped. */
 function escapeHtml(text) {
-  return text.replace(/[&<>"']/g, (c) => ESCAPES[c]);
+  return /[&<>"']/.test(text) ? text.replace(/[&<>"']/g, (c) => ESCAPES[c]) : text;
 }
 
 /** The most characters a slug keeps before a collision suffix. */
@@ -52,8 +52,7 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 
 
 /** A YYYY-MM-DD date in words, from the string alone: "2026-11-09" is "9 November 2026". */
 function longDate(date) {
-  const [y, m, d] = date.split('-');
-  return `${Number(d)} ${MONTHS[Number(m) - 1]} ${y}`;
+  return `${Number(date.slice(8))} ${MONTHS[Number(date.slice(5, 7)) - 1]} ${date.slice(0, 4)}`;
 }
 // makefun-site's front matter (README.md, "Front matter"): a strict subset of YAML's block mappings, its own. A source
 // opens on a line "---" and its front matter runs to the next line "---"; every line between is blank, a comment
@@ -162,8 +161,8 @@ function parseFrontMatter(text) {
   if (!Object.hasOwn(data, 'title')) return { error: 'no title' };
   return { data, body: text.slice(close + 1) };
 }
-// makefun-site's Markdown (README.md, "Markdown"): its own subset, lexed into block tokens and then rendered, in the
-// shape of marked's lexer and parser. Blocks: ATX headings (each with an id), fenced code, thematic breaks,
+// makefun-site's Markdown subset renders blocks as it reads their lines.
+// Blocks: ATX headings (each with an id), fenced code, thematic breaks,
 // blockquotes, flat lists and paragraphs. Inline: code spans, strong, emphasis, links and backslash escapes. No raw
 // HTML (every < is escaped), no setext headings, no indented code, no tables, no reference links, no underscore
 // emphasis.
@@ -747,6 +746,7 @@ function frontMatter(b) {
       b.report.push(`draft ${s.path}`);
       continue;
     }
+    s.dateLong = s.data.date === undefined ? '' : longDate(s.data.date);
     kept.push(s);
   }
   b.sources = kept;
@@ -836,7 +836,7 @@ function tags(b) {
 }
 
 /** A page's link record as templates read it. */
-const linkOf = (s) => (s === null ? null : { title: s.data.title, url: s.url, date: s.data.date ?? '', date_long: s.data.date === undefined ? '' : longDate(s.data.date) });
+const linkOf = (s) => (s === null ? null : { title: s.data.title, url: s.url, date: s.data.date ?? '', date_long: s.dateLong });
 
 /** A tag as templates read it (its posts as cards). */
 const tagOf = (b, t) => ({ name: t.name, slug: t.slug, url: t.url, count: t.posts.length, posts: t.posts.map((p) => b.cards.get(p)) });
@@ -847,7 +847,7 @@ function cardOf(s) {
     title: s.data.title,
     url: s.url,
     date: s.data.date ?? '',
-    date_long: s.data.date === undefined ? '' : longDate(s.data.date),
+    date_long: s.dateLong,
     summary: s.data.summary ?? '',
     excerpt: s.excerpt,
     reading_minutes: Math.max(1, Math.ceil(wordsOf(s.body) / 200)),
@@ -861,7 +861,7 @@ function pageOf(s, card) {
     ...card,
     slug: s.slug,
     content: s.html,
-    toc: s.toc.map((h) => ({ level: h.level, id: h.id, html: h.html })),
+    toc: s.toc,
     newer: linkOf(s.newer ?? null),
     older: linkOf(s.older ?? null),
     is_post: s.post,
@@ -905,7 +905,7 @@ function layouts(b) {
 /** 8. The report: every refusal, draft, broken link and template that did not parse, sorted, then the counts. */
 function report(b) {
   const lines = [...b.report, ...b.broken].sort(byCodeUnits);
-  const pages = b.sources.filter((s) => !s.post).length;
+  const pages = b.sources.length - b.posts.length;
   lines.push(`built ${pages} pages, ${b.posts.length} posts, ${b.tags.length} tags and ${b.statics.length} static files`);
   b.output[REPORT_FILE] = `${lines.join('\n')}\n`;
 }
