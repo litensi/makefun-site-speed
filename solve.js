@@ -174,87 +174,31 @@ const FENCE_OPEN = /^```([A-Za-z0-9_+-]*)[ \t]*$/;
 const FENCE_CLOSE = /^```[ \t]*$/;
 const HEADING = /^(#{1,6})[ \t]+(.*?)[ \t]*$/;
 const HR = /^(?:---|\*\*\*)[ \t]*$/;
-const QUOTE = /^>/;
 const BULLET = /^[-*] (.*)$/;
 const ORDERED = /^(\d{1,9})\. (.*)$/;
 const CONTINUED = /^ {2,}\S/;
 
-/** A heading line's level and text, or null (a heading's text is never empty). */
-function headingOf(line) {
-  const m = HEADING.exec(line);
-  return m === null || m[2] === '' ? null : { depth: m[1].length, text: m[2] };
-}
-
-/** Whether `line` ends a paragraph: a blank line, a fence, a heading or a thematic break. */
 function endsParagraph(line) {
-  return BLANK.test(line) || FENCE_OPEN.test(line) || headingOf(line) !== null || HR.test(line);
+  switch (line.charCodeAt(0)) {
+    case 32:
+    case 9: return BLANK.test(line);
+    case 96: return FENCE_OPEN.test(line);
+    case 35: {
+      const heading = HEADING.exec(line);
+      return heading !== null && heading[2] !== '';
+    }
+    case 45:
+    case 42: return HR.test(line);
+    default: return line.length === 0;
+  }
 }
 
-/** A paragraph line as it is rendered: spaces and tabs at either end dropped. */
-const trimLine = (line) => line.replace(/^[ \t]+|[ \t]+$/g, '');
-
-/** `src`'s block tokens, in order. */
-function lex(src) {
-  const lines = src.split('\n');
-  const tokens = [];
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-    if (BLANK.test(line)) {
-      i++;
-      continue;
-    }
-    const fence = FENCE_OPEN.exec(line);
-    if (fence !== null) {
-      const body = [];
-      i++;
-      while (i < lines.length && !FENCE_CLOSE.test(lines[i])) body.push(lines[i++]);
-      i++;
-      tokens.push({ type: 'code', lang: fence[1], lines: body });
-      continue;
-    }
-    const heading = headingOf(line);
-    if (heading !== null) {
-      tokens.push({ type: 'heading', depth: heading.depth, text: heading.text });
-      i++;
-      continue;
-    }
-    if (HR.test(line)) {
-      tokens.push({ type: 'hr' });
-      i++;
-      continue;
-    }
-    if (QUOTE.test(line)) {
-      const body = [];
-      while (i < lines.length && QUOTE.test(lines[i])) body.push(lines[i++].replace(/^> ?/, ''));
-      tokens.push({ type: 'blockquote', lines: body.map(trimLine).filter((l) => l !== '') });
-      continue;
-    }
-    const bullet = BULLET.exec(line);
-    const ordered = bullet === null ? ORDERED.exec(line) : null;
-    if (bullet !== null || ordered !== null) {
-      const isOrdered = ordered !== null;
-      const marker = isOrdered ? ORDERED : BULLET;
-      const items = [];
-      while (i < lines.length) {
-        const m = marker.exec(lines[i]);
-        if (m !== null) {
-          items.push([trimLine(isOrdered ? m[2] : m[1])]);
-          i++;
-        } else if (CONTINUED.test(lines[i])) {
-          items[items.length - 1].push(trimLine(lines[i]));
-          i++;
-        } else break;
-      }
-      tokens.push({ type: 'list', ordered: isOrdered, start: isOrdered ? Number(ordered[1]) : 1, items: items.map((parts) => parts.join('\n')) });
-      continue;
-    }
-    const body = [trimLine(line)];
-    i++;
-    while (i < lines.length && !endsParagraph(lines[i])) body.push(trimLine(lines[i++]));
-    tokens.push({ type: 'paragraph', text: body.join('\n') });
-  }
-  return tokens;
+function trimLine(line) {
+  let start = 0;
+  let end = line.length;
+  while (start < end && (line[start] === ' ' || line[start] === '\t')) start++;
+  while (end > start && (line[end - 1] === ' ' || line[end - 1] === '\t')) end--;
+  return start === 0 && end === line.length ? line : line.slice(start, end);
 }
 
 /** The characters a backslash escapes. */
@@ -298,11 +242,11 @@ function inline(s, env) {
   let i = 0;
   while (i < s.length) {
     INLINE_SPECIAL.lastIndex = i;
-    const match = INLINE_SPECIAL.exec(s);
-    if (match === null) return out + s.slice(i);
-    const c = match[0];
-    out += s.slice(i, match.index);
-    i = match.index;
+    if (!INLINE_SPECIAL.test(s)) return out + s.slice(i);
+    const start = INLINE_SPECIAL.lastIndex - 1;
+    if (start !== i) out += s.slice(i, start);
+    i = start;
+    const c = s[i];
     if (c === '\\' && ESCAPABLE.has(s[i + 1])) {
       const escaped = s[i + 1];
       out += ESCAPES[escaped] ?? escaped;
@@ -366,45 +310,87 @@ function inline(s, env) {
  * and 3 heading: level, id and its inline HTML) and its excerpt (the first paragraph's inline HTML, or "").
  */
 function renderMarkdown(src, env) {
+  const lines = src.split('\n');
   const ids = new Set();
   const blocks = [];
   const toc = [];
   let excerpt = null;
-  for (const t of lex(src)) {
-    switch (t.type) {
-      case 'heading': {
-        const id = uniqueSlug(slugify(t.text), ids);
-        const html = inline(t.text, env);
-        blocks.push(`<h${t.depth} id="${id}">${html}</h${t.depth}>`);
-        if (t.depth === 2 || t.depth === 3) toc.push({ level: t.depth, id, html });
-        break;
-      }
-      case 'code': {
-        const cls = t.lang === '' ? '' : ` class="language-${escapeHtml(t.lang)}"`;
-        blocks.push(`<pre><code${cls}>${t.lines.map((l) => `${escapeHtml(l)}\n`).join('')}</code></pre>`);
-        break;
-      }
-      case 'hr':
-        blocks.push('<hr>');
-        break;
-      case 'blockquote':
-        blocks.push(t.lines.length === 0 ? '<blockquote>\n</blockquote>' : `<blockquote>\n<p>${inline(t.lines.join('\n'), env)}</p>\n</blockquote>`);
-        break;
-      case 'list': {
-        const tag = t.ordered ? 'ol' : 'ul';
-        const open = t.ordered && t.start !== 1 ? `<ol start="${t.start}">` : `<${tag}>`;
-        blocks.push(`${open}\n${t.items.map((item) => `<li>${inline(item, env)}</li>\n`).join('')}</${tag}>`);
-        break;
-      }
-      case 'paragraph': {
-        const html = inline(t.text, env);
-        if (excerpt === null) excerpt = html;
-        blocks.push(`<p>${html}</p>`);
-        break;
-      }
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i++];
+    const first = line.charCodeAt(0);
+    if (line === '' || ((first === 32 || first === 9) && BLANK.test(line))) continue;
+
+    const fence = first === 96 ? FENCE_OPEN.exec(line) : null;
+    if (fence !== null) {
+      const cls = fence[1] === '' ? '' : ` class="language-${fence[1]}"`;
+      let end = i;
+      while (end < lines.length && !FENCE_CLOSE.test(lines[end])) end++;
+      const code = end === i ? '' : escapeHtml(lines.slice(i, end).join('\n')) + '\n';
+      blocks.push(`<pre><code${cls}>${code}</code></pre>\n`);
+      i = end + 1;
+      continue;
     }
+
+    const heading = first === 35 ? HEADING.exec(line) : null;
+    if (heading !== null && heading[2] !== '') {
+      const level = heading[1].length;
+      const id = uniqueSlug(slugify(heading[2]), ids);
+      const html = inline(heading[2], env);
+      blocks.push(`<h${level} id="${id}">${html}</h${level}>\n`);
+      if (level === 2 || level === 3) toc.push({ level, id, html });
+      continue;
+    }
+
+    if ((first === 45 || first === 42) && HR.test(line)) {
+      blocks.push('<hr>\n');
+      continue;
+    }
+
+    if (first === 62) {
+      const body = [];
+      let quote = line;
+      do {
+        const text = trimLine(quote.slice(1));
+        if (text !== '') body.push(text);
+        quote = lines[i];
+        if (quote === undefined || quote[0] !== '>') break;
+        i++;
+      } while (true);
+      blocks.push(body.length === 0 ? '<blockquote>\n</blockquote>\n' :
+        `<blockquote>\n<p>${inline(body.join('\n'), env)}</p>\n</blockquote>\n`);
+      continue;
+    }
+
+    const bullet = first === 45 || first === 42 ? BULLET.exec(line) : null;
+    const ordered = first >= 48 && first <= 57 ? ORDERED.exec(line) : null;
+    if (bullet !== null || ordered !== null) {
+      const marker = ordered === null ? BULLET : ORDERED;
+      const start = ordered === null ? 1 : Number(ordered[1]);
+      const tag = ordered === null ? 'ul' : 'ol';
+      let block = start === 1 ? `<${tag}>\n` : `<ol start="${start}">\n`;
+      let item = trimLine(ordered === null ? bullet[1] : ordered[2]);
+      while (i < lines.length) {
+        const next = marker.exec(lines[i]);
+        if (next !== null) {
+          block += `<li>${inline(item, env)}</li>\n`;
+          item = trimLine(next[ordered === null ? 1 : 2]);
+        } else if (CONTINUED.test(lines[i])) {
+          item += '\n' + trimLine(lines[i]);
+        } else break;
+        i++;
+      }
+      blocks.push(`${block}<li>${inline(item, env)}</li>\n</${tag}>\n`);
+      continue;
+    }
+
+    let paragraph = trimLine(line);
+    while (i < lines.length && !endsParagraph(lines[i])) paragraph += '\n' + trimLine(lines[i++]);
+    const html = inline(paragraph, env);
+    if (excerpt === null) excerpt = html;
+    blocks.push(`<p>${html}</p>\n`);
   }
-  return { html: blocks.map((b) => `${b}\n`).join(''), toc, excerpt: excerpt ?? '' };
+  return { html: blocks.join(''), toc, excerpt: excerpt ?? '' };
 }
 // makefun-site's template dialect (README.md, "Templates"): its own, not Liquid, Nunjucks, Mustache or EJS.
 //
@@ -721,7 +707,7 @@ const dirOf = (path) => (path.includes('/') ? path.slice(0, path.lastIndexOf('/'
 function readSources(b) {
   const files = [...b.input.files].sort((x, y) => byCodeUnits(x.path, y.path));
   for (const f of files) {
-    if (f.path.endsWith('.md')) b.sources.push({ path: f.path, text: f.content.replace(/\r\n?/g, '\n') });
+    if (f.path.endsWith('.md')) b.sources.push({ path: f.path, text: f.content.includes('\r') ? f.content.replace(/\r\n?/g, '\n') : f.content });
     else b.statics.push({ path: f.path, content: f.content });
   }
 }
