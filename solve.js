@@ -33,23 +33,11 @@ const SLUG_MAX = 64;
  * left.
  */
 function slugify(text) {
-  const plain = text.normalize('NFKD').replace(/\p{M}/gu, '');
-  let out = '';
-  let gap = false;
-  for (const ch of plain) {
-    let keep = null;
-    if (ch >= 'A' && ch <= 'Z') keep = ch.toLowerCase();
-    else if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) keep = ch;
-    if (keep === null) {
-      gap = out.length > 0;
-      continue;
-    }
-    if (gap) out += '-';
-    gap = false;
-    out += keep;
-  }
-  out = out.slice(0, SLUG_MAX).replace(/-+$/, '');
-  return out === '' ? 'untitled' : out;
+  const plain = /[^\x00-\x7f]/.test(text) ? text.normalize('NFKD').replace(/\p{M}/gu, '') : text;
+  const words = plain.match(/[A-Za-z0-9]+/g);
+  if (words === null) return 'untitled';
+  const slug = words.join('-').slice(0, SLUG_MAX).toLowerCase();
+  return slug.endsWith('-') ? slug.slice(0, -1) : slug;
 }
 
 /** `slug` made unique against `taken` (and added to it): the first of slug, slug-2, slug-3 ... not taken. */
@@ -751,23 +739,30 @@ function collections(b) {
 /** 6. The tags: grouped by their slug, each named as first met in the posts' order, ordered by count and then slug. */
 function tags(b) {
   const bySlug = new Map();
-  /** A source's tags, each slug once, in its own order. */
-  const ownTags = (s) => {
+  const slugs = new Map();
+  function addTags(source) {
+    const refs = [];
     const seen = new Set();
-    return (s.data.tags ?? []).filter((name) => !seen.has(slugify(name)) && seen.add(slugify(name)));
-  };
-  for (const p of b.posts) {
-    p.tagRefs = [];
-    for (const name of ownTags(p)) {
-      const slug = slugify(name);
-      if (!bySlug.has(slug)) bySlug.set(slug, { name, slug, url: `${b.base}/tags/${slug}/`, posts: [] });
-      const tag = bySlug.get(slug);
-      tag.posts.push(p);
-      p.tagRefs.push(tag);
+    for (const name of source.data.tags ?? []) {
+      let slug = slugs.get(name);
+      if (slug === undefined) {
+        slug = slugify(name);
+        slugs.set(name, slug);
+      }
+      if (seen.has(slug)) continue;
+      seen.add(slug);
+      let tag = bySlug.get(slug);
+      if (tag === undefined) {
+        tag = { name, slug, url: source.post ? `${b.base}/tags/${slug}/` : '', posts: [] };
+        if (source.post) bySlug.set(slug, tag);
+      }
+      if (source.post) tag.posts.push(source);
+      refs.push(tag);
     }
+    source.tagRefs = refs;
   }
-  // A page's tags link to the posts' tag of the same slug, and to nothing (url "") where no post has it.
-  for (const s of b.sources) if (!s.post) s.tagRefs = ownTags(s).map((name) => bySlug.get(slugify(name)) ?? { name, slug: slugify(name), url: '', posts: [] });
+  for (const post of b.posts) addTags(post);
+  for (const source of b.sources) if (!source.post) addTags(source);
   b.tags = [...bySlug.values()].sort((x, y) => y.posts.length - x.posts.length || byCodeUnits(x.slug, y.slug));
 }
 
