@@ -206,7 +206,11 @@ const ESCAPABLE = new Set(['\\', '`', '*', '_', '[', ']', '(', ')', '#', '+', '-
 
 /** The first index from `from` where `s` holds `what` outside a backslash escape, or -1. */
 function findUnescaped(s, what, from) {
-  for (let j = from; j <= s.length - what.length; j++) {
+  const match = s.indexOf(what, from);
+  if (match === -1) return -1;
+  const slash = s.indexOf('\\', from);
+  if (slash === -1 || slash >= match) return match;
+  for (let j = slash; j <= s.length - what.length; j++) {
     if (s[j] === '\\' && j + 1 < s.length && ESCAPABLE.has(s[j + 1])) {
       j++;
       continue;
